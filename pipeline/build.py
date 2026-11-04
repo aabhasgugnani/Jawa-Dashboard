@@ -24,6 +24,7 @@ sys.path.insert(0, HERE)
 from make_client import make_client
 import gzip
 from payload import build_payload, build_daily
+from segments import fetch_vahan, tier_lookup, build_seg
 
 MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 LIVE_FROM = "May'26"
@@ -291,6 +292,10 @@ def main():
     payload_u = build_payload(u_leads, u_ret, built_iso)
     daily, daily_u = build_daily(p_leads, p_ret, built_iso), build_daily(u_leads, u_ret, built_iso)
     payload['uq'], payload_u['uq'] = 0, 1
+    # CLPL segments (Top 40 / Next 40 / Rest of India): our retails vs Vahan registrations
+    live['vahan'] = fetch_vahan(live.get('vahan'), log)
+    tier_of = tier_lookup(ct)
+    payload['seg'], payload_u['seg'] = build_seg(payload, live['vahan'], tier_of), build_seg(payload_u, live['vahan'], tier_of)
     log(f"new-view unique payload: {len(u_leads):,} customers, {len(u_ret):,} retailed")
     log(f"new-view payload: {len(p_leads):,} leads, {len(p_ret):,} retails, ageing {payload['ram_meta']}")
 
