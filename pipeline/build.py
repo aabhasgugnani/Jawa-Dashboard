@@ -166,6 +166,13 @@ def main():
         sys.exit(f'retail sheet failed: {e}')
     retails = parse_retails(rrows)
     log(f"retail sheet: {len(rrows):,} rows, {len(retails):,} Jawa retails")
+    # Running archive of retails, like the one kept for leads: the retail sheet has dropped old rows before, which made
+    # those retails vanish from every month. A retail stays once seen; the sheet's own row replaces it when present.
+    archived = live.get('retails') or {}
+    kept = {k: v for k, v in archived.items() if k not in retails}
+    live['retails'] = {**archived, **retails}
+    retails = dict(live['retails'])
+    log(f"retail archive: {len(archived):,} carried in, {len(kept):,} no longer in the sheet kept, {len(retails):,} retails in use")
 
     # ---- 3. dealers
     ct = {}
