@@ -24,7 +24,7 @@ sys.path.insert(0, HERE)
 from make_client import make_client
 import gzip
 from payload import build_payload, build_daily
-from segments import fetch_vahan, tier_lookup, build_seg
+from segments import fetch_vahan, tier_lookup, build_seg, build_vahan
 
 MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 LIVE_FROM = "May'26"
@@ -283,7 +283,7 @@ def main():
                         'cd': x['date'], 'dl': dn, 'sn': x['cs']})
         if x['rm']:
             p_ret[x['lid']] = {'rtype': 'DMS' if x['rsrc'] == 'DMS' else 'Call Out', 'rm': x['pm'], 'pm': x['rm'], 'rd': x.get('rd', ''), 'ad': x.get('ad', '')}
-    built_iso = (datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) + datetime.timedelta(hours=5, minutes=30)).isoformat()
+    built_iso = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat()   # UTC; the dashboard shows it in IST
     payload = build_payload(p_leads, p_ret, built_iso)
     # Unique-leads version: one enquiry per customer (mobile) per lead month, as the Old view does with a single month
     # selected: the retailing enquiry if there is one, else the earliest created. A customer who enquires in two
@@ -303,6 +303,7 @@ def main():
     live['vahan'] = fetch_vahan(live.get('vahan'), log)
     tier_of = tier_lookup(ct)
     payload['seg'], payload_u['seg'] = build_seg(payload, live['vahan'], tier_of), build_seg(payload_u, live['vahan'], tier_of)
+    payload['vahan'], payload_u['vahan'] = build_vahan(payload, live['vahan']), build_vahan(payload_u, live['vahan'])
     log(f"new-view unique payload: {len(u_leads):,} customers, {len(u_ret):,} retailed")
     log(f"new-view payload: {len(p_leads):,} leads, {len(p_ret):,} retails, ageing {payload['ram_meta']}")
 

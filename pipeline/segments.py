@@ -12,6 +12,11 @@ TIERS = ['Top 40 Cities', 'Next 40 Cities', 'Rest of India']
 _MN = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
 
+def _iso(txt):
+    d, m, y = txt.split()
+    return f"{int(y):04d}-{_MN.index(m[:3].title()) + 1:02d}-{int(d):02d}"
+
+
 def fetch_vahan(prev=None, log=print):
     """Compact copy of the site's data: months, Vahan registrations per (state, city), BikeDekho -> Vahan city names.
     Falls back to the previous run's copy when the site cannot be read."""
@@ -27,7 +32,10 @@ def fetch_vahan(prev=None, log=print):
         for i, mo, f, v in D['rv']:
             regs.setdefault(eff[i], [0] * nm)[mo] += v
         months = [f"{_MN[int(m[5:7]) - 1]}'{m[2:4]}" for m in D['months']]
-        out = {'asof': D.get('generated', ''), 'months': months,
+        txt = re.sub(r'<[^>]+>', ' ', h)
+        mm = re.search(r'Data\s+(\d{1,2}\s+\w{3}\s+\d{4})\D{1,12}?(\d{1,2}\s+\w{3}\s+\d{4})\D{1,12}?Last updated\s+(\d{1,2}\s+\w{3}\s+\d{4})', txt)
+        dates = [_iso(x) for x in mm.groups()] if mm else [None, None, None]
+        out = {'asof': D.get('generated', ''), 'months': months, 'from': dates[0], 'through': dates[1], 'updated': dates[2],
                'cities': [[st, c, v] for (st, c), v in sorted(regs.items())],
                'bd': [[b[1], b[0], b[2]] for b in bdc]}
         log(f"vahan: {sum(sum(v) for v in regs.values()):,} registrations, {len(regs)} cities, {months[0]}..{months[-1]}")
@@ -75,3 +83,62 @@ def build_seg(payload, vahan, tier_of):
         v = ours[tier_of(city[r[0]])][i]
         v[0] += r[3]; v[1] += r[4]; v[2] += r[5]
     return {'asof': vahan.get('asof', ''), 'months': months, 'tiers': TIERS, 'ours': ours, 'vahan': vah, 'cities': ncity}
+
+
+def build_vahan(payload, vahan):
+    """Block for the Vahan Gap tab: per state and per city, Vahan registrations, our leads (by lead month) and our retails
+    (by the month attributed) for every Vahan month. Arrays per month, wrapped as [ICE, EV, XL100] (Jawa has ICE only)."""
+    if not vahan: return None
+    months = vahan['months']; nm = len(months); mi = {m: i for i, m in enumerate(months)}
+    mkeys = [f"20{m[-2:]}-{_MN.index(m[:3]) + 1:02d}" for m in months]
+    eff = {(st, c) for st, c, _ in vahan['cities']}
+    states = {st.lower(): st for st, _, _ in vahan['cities']}
+    bdmap = {}
+    for bn, st, dc in vahan['bd']:
+        bdmap.setdefault(bn.lower(), []).append((st, dc))
+    mp = payload['maps']; lm, city, cst, stn = mp['lm'], mp['city'], mp['city_state'], mp['st']
+
+    def locate(ci):
+        name = city[ci]; ours = (stn[cst[ci]] if cst[ci] is not None else '').lower()
+        c = bdmap.get(name.lower(), [])
+        pick = next((x for x in c if x[0].lower() == ours), c[0] if c else None)
+        if pick:
+            st, dc = pick
+            return (st, dc if (st, dc) in eff else 'Rest of ' + st)
+        st = states.get(ours)
+        if st: return (st, name if (st, name) in eff else 'Rest of ' + st)
+        return None
+
+    cache = {}
+    def loc(ci):
+        if ci not in cache: cache[ci] = locate(ci)
+        return cache[ci]
+
+    V, L, R = {}, {}, {}
+    z = lambda: [0] * nm
+    for st, c, v in vahan['cities']: V[(st, c)] = list(v)
+    totL, totR = z(), z()
+    for r in payload['cm']:                          # [city, lead month, leads, retails, DMS, Call Out]
+        i = mi.get(lm[r[1]])
+        if i is None: continue
+        totL[i] += r[2]
+        k = loc(r[0])
+        if k: L.setdefault(k, z())[i] += r[2]
+    for r in payload['u_cm']:                        # retails sit on the month attributed
+        i = mi.get(lm[r[1]])
+        if i is None or not r[3]: continue
+        totR[i] += r[3]
+        k = loc(r[0])
+        if k: R.setdefault(k, z())[i] += r[3]
+    three = lambda a: [list(a), z(), z()]
+    totV = [sum(v[i] for v in V.values()) for i in range(nm)]
+    ct = [[st, c, three(V.get((st, c), z())), three(L.get((st, c), z())), three(R.get((st, c), z()))]
+          for st, c in sorted(set(V) | set(L) | set(R))]
+    stt = {}
+    for st, c, v, l, r in ct:
+        e = stt.setdefault(st, [z(), z(), z()])
+        for j in range(nm): e[0][j] += v[0][j]; e[1][j] += l[0][j]; e[2][j] += r[0][j]
+    return {'months': months, 'mkeys': mkeys, 'from': vahan.get('from') or mkeys[0] + '-01', 'through': vahan.get('through') or mkeys[-1] + '-28',
+            'updated': vahan.get('updated') or vahan.get('through') or mkeys[-1] + '-28', 'cap': {}, 'xlm': {},
+            'tot': {'V': three(totV), 'L': three(totL), 'R': three(totR)},
+            'st': [[st, three(v), three(l), three(r)] for st, (v, l, r) in sorted(stt.items())], 'ct': ct}
