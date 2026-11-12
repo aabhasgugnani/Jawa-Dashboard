@@ -1,119 +1,78 @@
 name: Jawa Dashboard Refresh
 
+# Mirror of the dashboard built by yashtayal-a11y/Jawa-Dashboard.
+# The original build needs that repo's secrets (JAWA_STATE_KEY, JAWA_SOURCES), which aren't available here,
+# so this copies the finished, published dashboard and republishes it on this repo's GitHub Pages.
+# Each successful copy is also saved in snapshot/ so the site keeps working if the source ever goes away.
+# The original build workflow is in this repo's git history (and in pipeline/).
+
 on:
   schedule:
-    # 10:00 and 16:00 IST. Scheduled runs can lag by hours, so there are two a day.
-    - cron: "30 4 * * *"
-    - cron: "30 10 * * *"
+    # ~11:30 and ~17:30 IST, an hour or so after the source's own 10:00 / 16:00 IST builds.
+    - cron: "7 6 * * *"
+    - cron: "7 12 * * *"
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths: ["pipeline/**", ".github/workflows/deploy.yml"]
 
 concurrency:
   group: jawa-refresh
   cancel-in-progress: false
 
 permissions:
-  contents: write      # state release assets + keep-alive commit
+  contents: write
   pages: write
   id-token: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    outputs:
-      cf: ${{ steps.mode.outputs.cf }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Fetch private state (encrypted release assets)
-        env:
-          GH_TOKEN: ${{ github.token }}
-          JAWA_STATE_KEY: ${{ secrets.JAWA_STATE_KEY }}
+      - name: Copy the published dashboard
+        id: copy
         run: |
-          mkdir -p work/inputs
-          gh release download jawa-state --pattern inputs.enc --dir work
-          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:JAWA_STATE_KEY -in work/inputs.enc | tar xz -C work/inputs
-          if gh release download jawa-state --pattern live.enc --dir work 2>/dev/null; then
-            openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:JAWA_STATE_KEY -in work/live.enc | gunzip > work/live.json
+          SRC=https://yashtayal-a11y.github.io/Jawa-Dashboard
+          FILES="index.html new.html version.json data/jawa_payload.json.gz data/jawa_payload_unique.json.gz data/jawa_daily.json.gz data/jawa_daily_unique.json.gz"
+          mkdir -p fresh/data
+          ok=true
+          for f in $FILES; do
+            curl -fsSL --retry 3 -o "fresh/$f" "$SRC/$f?nocache=$(date +%s)" || { echo "::warning::could not fetch $f"; ok=false; }
+          done
+          if $ok; then
+            rm -rf snapshot && mv fresh snapshot
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+            echo "Copied the latest build: $(cat snapshot/version.json)"
           else
-            echo "no live archive yet (first run)"
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Source site unavailable - republishing the last saved snapshot"
+            [ -f snapshot/index.html ] || { echo "::error::no saved snapshot yet"; exit 1; }
           fi
 
-      - name: Choose hosting
-        id: mode
-        env:
-          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Save snapshot and keep repo active
+        continue-on-error: true
         run: |
-          # Cloudflare token present -> publish to Cloudflare Pages (behind Access). Otherwise GitHub Pages.
-          if [ -n "$CF_TOKEN" ]; then echo "cf=true" >> "$GITHUB_OUTPUT"; else echo "cf=false" >> "$GITHUB_OUTPUT"; fi
-
-      - name: Build dashboard from Drive sheets
-        env:
-          JAWA_SOURCES: ${{ secrets.JAWA_SOURCES }}
-          JAWA_AUTH: ${{ vars.JAWA_AUTH }}
-        run: |
-          printf '%s' "$JAWA_SOURCES" > work/sources.json
-          python pipeline/build.py --inputs work/inputs --live work/live.json --sources work/sources.json --out work/out
-          rm -f work/sources.json
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          echo "Last run: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" > last_run.txt
+          git add -A snapshot last_run.txt
+          git diff --cached --quiet || git commit -q -m "chore: refresh $(date -u '+%Y-%m-%d %H:%M')"
+          git push
 
       - name: Prepare site
         run: |
           mkdir -p _site
-          cp work/out/client.html _site/index.html
-          cp work/out/version.json _site/version.json
-          # The New dashboards carry Source / Lead Type data. Published on the current (public) site by choice.
-          cp work/out/new.html _site/new.html
-          mkdir -p _site/data && cp work/out/data/jawa_payload.json.gz work/out/data/jawa_payload_unique.json.gz work/out/data/jawa_daily.json.gz work/out/data/jawa_daily_unique.json.gz _site/data/
+          cp -r snapshot/. _site/
+          # point the "Run data refresh" button at this repo's workflow
+          sed -i "s#github.com/yashtayal-a11y/Jawa-Dashboard#github.com/${GITHUB_REPOSITORY}#g" _site/index.html _site/new.html
           ls -laR _site | head -20
 
-      - name: Save live archive (encrypted)
-        env:
-          GH_TOKEN: ${{ github.token }}
-          JAWA_STATE_KEY: ${{ secrets.JAWA_STATE_KEY }}
-        run: |
-          gzip -c work/live.json | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:JAWA_STATE_KEY -out work/live.enc
-          gh release upload jawa-state work/live.enc --clobber
-
-      - name: Keep repo active
-        continue-on-error: true      # a keep-alive commit must never block publishing
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          for i in 1 2 3; do
-            git fetch -q origin main && git reset -q --hard origin/main
-            echo "Last run: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" > last_run.txt
-            git add last_run.txt
-            git diff --cached --quiet || git commit -q -m "chore: refresh $(date -u '+%Y-%m-%d %H:%M')"
-            git push && break
-            sleep 3
-          done
-
-      - name: Publish to Cloudflare Pages
-        if: steps.mode.outputs.cf == 'true'
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CF_PROJECT: ${{ vars.CF_PROJECT }}
-        run: |
-          npx -y wrangler@4 pages deploy _site --project-name "${CF_PROJECT:-jawa-dashboard}" --branch main --commit-dirty=true
-
       - uses: actions/configure-pages@v5
-        if: steps.mode.outputs.cf != 'true'
       - uses: actions/upload-pages-artifact@v3
-        if: steps.mode.outputs.cf != 'true'
         with:
           path: _site
 
   deploy:
     needs: build
-    if: needs.build.outputs.cf != 'true'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
