@@ -1,0 +1,43 @@
+name: Rotate state key (one-time)
+
+# Re-encrypts the jawa-state release assets from JAWA_STATE_KEY (old) to JAWA_STATE_KEY_NEW.
+# Afterwards: set JAWA_STATE_KEY to the new value, delete JAWA_STATE_KEY_NEW, run "Jawa Dashboard Refresh".
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: jawa-refresh
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  rotate:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      OLD: ${{ secrets.JAWA_STATE_KEY }}
+      NEW: ${{ secrets.JAWA_STATE_KEY_NEW }}
+    steps:
+      - name: Check keys
+        run: |
+          [ -n "$OLD" ] && [ -n "$NEW" ] || { echo "::error::JAWA_STATE_KEY and JAWA_STATE_KEY_NEW must both be set"; exit 1; }
+          [ "$OLD" != "$NEW" ] || { echo "::error::new key equals old key"; exit 1; }
+      - name: Re-encrypt and verify
+        run: |
+          mkdir rot new && cd rot
+          gh release download jawa-state --repo "$GITHUB_REPOSITORY" --pattern inputs.enc --pattern live.enc
+          ls -la
+          for f in inputs live; do
+            openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:OLD -in $f.enc > $f.plain
+            openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:NEW -in $f.plain -out ../new/$f.enc
+            openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass env:NEW -in ../new/$f.enc | cmp - $f.plain
+            echo "$f: re-encrypted and verified ($(wc -c < $f.plain) bytes)"
+          done
+          rm -f *.plain
+      - name: Upload re-encrypted assets
+        run: |
+          gh release upload jawa-state new/inputs.enc new/live.enc --clobber --repo "$GITHUB_REPOSITORY"
+          echo "Done. Now set JAWA_STATE_KEY to the new key and delete JAWA_STATE_KEY_NEW."
