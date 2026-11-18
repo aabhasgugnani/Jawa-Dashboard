@@ -13,7 +13,8 @@ Jawa performance dashboard: daily build from Google Drive.
 History rules
   * Lead months up to Apr'26 are frozen (validated earlier from the FY master; Drive has no Apr'26).
   * Lead months from May'26 come from the Drive "JAWA" tabs, keyed by enquiryId.
-  * Retails come from the retail attribution sheet (Process = Jawa), matched by enquiryId.
+  * Retails come from the retail attribution sheet (Process = Jawa), matched by enquiryId, and are counted in their
+    Performance Month (the attribution month only when Performance Month is blank).
   * Customer mobiles are encrypted in the sheets; they are only used as salted hashes for de-duplication.
 """
 import sys, os, re, io, csv, json, time, hashlib, argparse, datetime, urllib.request, urllib.parse
@@ -108,6 +109,20 @@ def parse_retails(rows):
     return out
 
 
+def retail_month(rt):
+    """Month a retail is counted in: its Performance Month (how the business reports retails), else the attribution month."""
+    return rt.get('pmo') or rt.get('pm') or ''
+
+
+def retail_day(rt):
+    """Day shown for a retail in the On Update daily views: the attribution date, else the retail date, when it falls
+    inside the retail's month; otherwise the attribution date (shown as "no day recorded" for that month)."""
+    m = retail_month(rt)
+    for d in (rt.get('ad') or '', rt.get('rd') or ''):
+        if d and norm_month(d) == m: return d
+    return rt.get('ad') or ''
+
+
 MEDIUM_FALLBACK = {'Organic': 'Organic', 'Facebook': 'Facebook', 'Google': 'Google', 'Non-MS': 'Non CPS', 'Whatsapp': 'WhatsApp'}
 def derive_source(medium, lt, camp, table):
     """Source as the FY master labels it. The sheets only carry Medium, so this extends the master's own attribution to
@@ -173,6 +188,8 @@ def main():
     live['retails'] = {**archived, **retails}
     retails = dict(live['retails'])
     log(f"retail archive: {len(archived):,} carried in, {len(kept):,} no longer in the sheet kept, {len(retails):,} retails in use")
+    pmc = Counter(retail_month(r) for r in retails.values())
+    log("retails by performance month: " + ", ".join(f"{m} {pmc[m]}" for m in sorted(pmc, key=lambda m: mkey(m) if m else -1)[-6:]))
 
     # ---- 3. dealers
     ct = {}
@@ -210,7 +227,7 @@ def main():
         rt = retails.get(eid)
         if rt:
             used.add(eid)
-            row.update(rm=rt['model'] or model, pm=rt['pm'], rsrc=rt['src'], rd=rt['rd'], ad=rt['ad'])
+            row.update(rm=rt['model'] or model, pm=retail_month(rt), rsrc=rt['src'], rd=rt['rd'], ad=retail_day(rt))
         allrows.append(row); nlive += 1
     # retails whose lead is not in Drive: new-month ones become retail-only rows, older ones belong to frozen leads
     orphan_new = orphan_frozen = 0; fro_rets = []
@@ -222,13 +239,13 @@ def main():
             if code == 'UNKNOWN' and 'UNKNOWN' not in fmeta: fmeta['UNKNOWN'] = [rt['org'] or 'Unknown dealer', 'Unknown', 'Unknown', 'ROI', None, 0]
             allrows.append({'lm': rt['cm'], 'model': rt['model'] or 'Unspecified', 'dealer': code, 'sc': 'Converted',
                             'q': 'Qualified', 'cs': 'Retail Attribution', 'mob': next_idx, 'date': 'Unknown',
-                            'rm': rt['model'], 'pm': rt['pm'], 'rsrc': rt['src'], 'lid': eid, 'src': 'Unknown', 'lt': 'Unknown',
-                            'rd': rt['rd'], 'ad': rt['ad']})
+                            'rm': rt['model'], 'pm': retail_month(rt), 'rsrc': rt['src'], 'lid': eid, 'src': 'Unknown', 'lt': 'Unknown',
+                            'rd': rt['rd'], 'ad': retail_day(rt)})
             next_idx += 1; orphan_new += 1
         else:
             orphan_frozen += 1; fro_rets.append(rt)
 
-    # Leads up to Apr'26 are frozen without enquiry ids, so their retails are re-bucketed on the attribution month by
+    # Leads up to Apr'26 are frozen without enquiry ids, so their retails are re-bucketed on the performance month by
     # matching each sheet retail to a frozen retailed lead (lead month + performance month + purchased model + dealer).
     cand = defaultdict(list)
     for x in allrows:
@@ -243,9 +260,9 @@ def main():
             k = (rt['cm'], rt['pmo'], rt['model'], rt['org'].strip().lower())[:tier]
             for x in cand.get(k, ()):
                 if id(x) in taken: continue
-                taken.add(id(x)); done.add(id(rt)); x['pm'] = rt['pm']; x['ad'] = rt['ad']; x['rd'] = rt['rd']
+                taken.add(id(x)); done.add(id(rt)); x['pm'] = retail_month(rt); x['ad'] = retail_day(rt); x['rd'] = rt['rd']
                 mstats[tier] += 1; break
-    log(f"frozen-lead retails re-bucketed on attribution month: {len(done)} of {len(fro_rets)} sheet rows (by match tier {dict(mstats)})")
+    log(f"frozen-lead retails re-bucketed on performance month: {len(done)} of {len(fro_rets)} sheet rows (by match tier {dict(mstats)})")
     log(f"live leads {nlive:,}; retail-only rows {orphan_new}; retails on frozen months (already in frozen data, not re-added) {orphan_frozen}")
 
     # ---- 5. encode
